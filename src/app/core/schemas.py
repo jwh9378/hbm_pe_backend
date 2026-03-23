@@ -1,6 +1,6 @@
 import uuid as uuid_pkg
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_serializer
 from uuid6 import uuid7
@@ -84,3 +84,12 @@ class TokenBlacklistCreate(TokenBlacklistBase):
 
 class TokenBlacklistUpdate(TokenBlacklistBase):
     pass
+
+
+# -------------- raspberry --------------
+class RaspberryStatusResponse(BaseModel):
+    backendStatus: Literal["ready", "not ready", "checking"] | None = None
+    piAStatus: Literal["ready", "not ready", "checking"] | None = None
+    piBStatus: Literal["ready", "not ready", "checking"] | None = None
+    lastResult: str | None = None
+    lastUpdated: str | None = None

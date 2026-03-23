@@ -74,8 +74,7 @@ class FirstUserSettings(BaseSettings):
     ADMIN_PASSWORD: str = "!Ch4ng3Th1sP4ssW0rd!"
 
 
-class TestSettings(BaseSettings):
-    ...
+class TestSettings(BaseSettings): ...
 
 
 class RedisCacheSettings(BaseSettings):
@@ -149,6 +148,10 @@ class CORSSettings(BaseSettings):
     CORS_HEADERS: list[str] = ["*"]
 
 
+class IoTSettings(BaseSettings):
+    PI_PORT: int = 9999
+
+
 class Settings(
     AppSettings,
     SQLiteSettings,
@@ -164,6 +167,7 @@ class Settings(
     CRUDAdminSettings,
     EnvironmentSettings,
     CORSSettings,
+    IoTSettings,
 ):
     model_config = SettingsConfigDict(
         env_file=os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", ".env"),

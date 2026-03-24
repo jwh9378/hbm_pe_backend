@@ -1,8 +1,13 @@
 import asyncio
 import logging
 from typing import Any
+from zoneinfo import ZoneInfo
 
+from sqlalchemy import select
+
+from ...models.pgm_queue import PGMQueue
 from ..config import settings
+from ..db.database import local_session
 
 logger = logging.getLogger(__name__)
 
@@ -11,9 +16,28 @@ async def check_hardware_status(target_device_ip: str, port: int = settings.PI_P
     """지정된 IP와 포트로 소켓 연결을 통해 하드웨어의 상태를 확인합니다."""
     pi_a_status = "not ready"
     pi_b_status = "not ready"
-    last_result = "N/A"  # TODO (Notice : Do not modify it)
-    last_updated = "N/A"  # TODO (Notice : Do not modify it)
+    last_result = "N/A"
+    last_updated = "N/A"
     writer = None
+
+    # 가장 최근에 실행 종료된(SUCCESS 또는 FAILED) 테스트 결과 조회
+    try:
+        async with local_session() as db:
+            stmt = (
+                select(PGMQueue).where(PGMQueue.status.in_(["SUCCESS", "FAILED"])).order_by(PGMQueue.id.desc()).limit(1)
+            )
+            result = await db.execute(stmt)
+            last_test = result.scalars().first()
+
+            if last_test:
+                last_result = "PASS" if last_test.status == "SUCCESS" else "FAIL"
+                last_updated = (
+                    last_test.created_at.astimezone(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M:%S")
+                    if last_test.created_at
+                    else "N/A"
+                )
+    except Exception as e:
+        logger.debug(f"Failed to fetch last test result from DB: {e}")
 
     try:
         reader, writer = await asyncio.wait_for(asyncio.open_connection(target_device_ip, port), timeout=2.0)

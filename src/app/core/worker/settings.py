@@ -1,14 +1,14 @@
 from arq.connections import RedisSettings
 
 from ...core.config import settings
-from .functions import sample_background_task, send_socket_command, shutdown, startup
+from .functions import sample_background_task, send_pgm_queue_to_pi, send_socket_command, shutdown, startup
 
 REDIS_QUEUE_HOST = settings.REDIS_QUEUE_HOST
 REDIS_QUEUE_PORT = settings.REDIS_QUEUE_PORT
 
 
 class WorkerSettings:
-    functions = [sample_background_task, send_socket_command]
+    functions = [sample_background_task, send_socket_command, send_pgm_queue_to_pi]
     redis_settings = RedisSettings(host=REDIS_QUEUE_HOST, port=REDIS_QUEUE_PORT)
     on_startup = startup
     on_shutdown = shutdown

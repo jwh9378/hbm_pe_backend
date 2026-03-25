@@ -151,11 +151,12 @@ async def send_pgm_queue_to_pi(ctx: Worker, pgm_queue_id: int, target_ip: str, p
     redis = ctx.get("redis")
 
     async with local_session() as db:
-        # 현재 상태가 여전히 RUNNING일 때만 성공/실패 상태로 업데이트 (API의 stop으로 인한 PENDING 롤백과 충돌 방지)
+        # 현재 상태가 여전히 RUNNING일 때만 성공/실패 상태로 업데이트 (ABORTED인 경우 무시)
+        status = "COMPLETED" if final_status == "SUCCESS" else "ERROR"
         stmt = (
             update(PGMQueue)
             .where(PGMQueue.id == pgm_queue_id, PGMQueue.status == "RUNNING")
-            .values(status=final_status, duration=duration)
+            .values(status=status, duration=duration)
             .returning(PGMQueue.id)
         )
         result = await db.execute(stmt)
@@ -163,16 +164,15 @@ async def send_pgm_queue_to_pi(ctx: Worker, pgm_queue_id: int, target_ip: str, p
         updated_item = result.first()
 
         if not updated_item:
-            # 이미 PENDING 등으로 롤백되었다면 이벤트를 발행하거나 이어서 실행하지 않고 종료
+            # 이벤트를 발행하거나 이어서 실행하지 않고 종료
             return
 
-        status_msg = "COMPLETED" if final_status == "SUCCESS" else "FAILED"
         await _publish_event(
             redis,
             target_ip,
             {
                 "type": "TEST_COMPLETED",
-                "status": status_msg,
+                "status": status,
                 "id": pgm_queue_id,
             },
         )
@@ -185,6 +185,7 @@ async def send_pgm_queue_to_pi(ctx: Worker, pgm_queue_id: int, target_ip: str, p
                 target_ip,
                 {
                     "type": "QUEUE_PAUSED",
+                    "status": "ERROR",
                     "message": "오류로 인해 큐가 일시 정지되었습니다.",
                     "id": pgm_queue_id,
                 },

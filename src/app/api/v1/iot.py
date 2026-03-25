@@ -260,11 +260,11 @@ async def _handle_stop_action(db: AsyncSession, redis: Redis, target_ip: str, ac
         action.upper(),
     )
 
-    # RUNNING 중인 항목이 있다면 상태를 PENDING으로 원자적 롤백 (Worker 종료 시점과 Race Condition 방지)
+    # RUNNING 중인 항목이 있다면 상태를 ABORTED으로 원자적 변경 (Worker 종료 시점과 Race Condition 방지)
     stmt = (
         update(PGMQueue)
         .where(PGMQueue.status == "RUNNING", PGMQueue.target_device_ip == target_ip)
-        .values(status="PENDING", started_at=None)
+        .values(status="ABORTED")
         .returning(PGMQueue.id)
     )
     result = await db.execute(stmt)
@@ -277,8 +277,8 @@ async def _handle_stop_action(db: AsyncSession, redis: Redis, target_ip: str, ac
             redis,
             target_ip,
             {
-                "type": "TEST_STATUS_CHANGED",
-                "status": "PENDING",
+                "type": "QUEUE_PAUSED",
+                "status": "ABORTED",
                 "id": item_id,
                 "action": action,
             },

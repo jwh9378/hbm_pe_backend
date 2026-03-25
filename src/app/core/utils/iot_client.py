@@ -20,12 +20,15 @@ async def check_hardware_status(target_device_ip: str, port: int = settings.PI_P
     last_updated = "N/A"
     writer = None
 
-    # 가장 최근에 실행 종료된(SUCCESS 또는 FAILED) 테스트 결과 조회
+    # 가장 최근에 실행 종료된(COMPLETED / ABORTED / ERROR) 테스트 결과 조회
     try:
         async with local_session() as db:
             stmt = (
                 select(PGMQueue)
-                .where(PGMQueue.status.in_(["SUCCESS", "FAILED"]), PGMQueue.target_device_ip == target_device_ip)
+                .where(
+                    PGMQueue.status.in_(["COMPLETED", "ABORTED", "ERROR"]),
+                    PGMQueue.target_device_ip == target_device_ip,
+                )
                 .order_by(PGMQueue.id.desc())
                 .limit(1)
             )
@@ -33,10 +36,10 @@ async def check_hardware_status(target_device_ip: str, port: int = settings.PI_P
             last_test = result.scalars().first()
 
             if last_test:
-                last_result = "PASS" if last_test.status == "SUCCESS" else "FAIL"
+                last_result = last_test.status
                 last_updated = (
-                    last_test.created_at.astimezone(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M:%S")
-                    if last_test.created_at
+                    last_test.started_at.astimezone(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M:%S")
+                    if last_test.started_at
                     else "N/A"
                 )
     except Exception as e:

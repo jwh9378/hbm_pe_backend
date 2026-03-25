@@ -24,7 +24,10 @@ async def check_hardware_status(target_device_ip: str, port: int = settings.PI_P
     try:
         async with local_session() as db:
             stmt = (
-                select(PGMQueue).where(PGMQueue.status.in_(["SUCCESS", "FAILED"])).order_by(PGMQueue.id.desc()).limit(1)
+                select(PGMQueue)
+                .where(PGMQueue.status.in_(["SUCCESS", "FAILED"]), PGMQueue.target_device_ip == target_device_ip)
+                .order_by(PGMQueue.id.desc())
+                .limit(1)
             )
             result = await db.execute(stmt)
             last_test = result.scalars().first()

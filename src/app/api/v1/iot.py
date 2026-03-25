@@ -136,14 +136,23 @@ async def websocket_test_status_endpoint(
 
 
 @router.get("/raspberry/pgm_queue", response_model=PGMQueueListResponse)
-async def fetch_raspberry_queue(db: Annotated[AsyncSession, Depends(async_get_db)]):
+async def fetch_raspberry_queue(target_device_ip: str, db: Annotated[AsyncSession, Depends(async_get_db)]):
     """라즈베리파이의 대기열(Queue) 목록을 조회합니다."""
     # RUNNING 및 PENDING 상태인 항목의 전체 개수를 조회합니다.
-    count_stmt = select(func.count()).select_from(PGMQueue).where(PGMQueue.status.in_(["RUNNING", "PENDING"]))
+    count_stmt = (
+        select(func.count())
+        .select_from(PGMQueue)
+        .where(PGMQueue.status.in_(["RUNNING", "PENDING"]), PGMQueue.target_device_ip == target_device_ip)
+    )
     total_count = (await db.execute(count_stmt)).scalar() or 0
 
     # DB에서 해당 IP 기기의 대기열 목록 중 RUNNING 및 PENDING 상태인 항목을 오래된 순으로 최대 20개 조회합니다.
-    stmt = select(PGMQueue).where(PGMQueue.status.in_(["RUNNING", "PENDING"])).order_by(PGMQueue.id.asc()).limit(20)
+    stmt = (
+        select(PGMQueue)
+        .where(PGMQueue.status.in_(["RUNNING", "PENDING"]), PGMQueue.target_device_ip == target_device_ip)
+        .order_by(PGMQueue.id.asc())
+        .limit(20)
+    )
     result = await db.execute(stmt)
     items = result.scalars().all()
 
@@ -174,14 +183,16 @@ async def remove_raspberry_queue(item_id: int, db: Annotated[AsyncSession, Depen
 async def _handle_start_action(db: AsyncSession, redis: Redis, target_ip: str) -> dict:
     """Start 명령에 대한 구체적인 처리 로직을 담당합니다."""
     # 현재 실행중인 항목이 있는지 확인 (중복 실행 방지)
-    running_stmt = select(PGMQueue.id).where(PGMQueue.status == "RUNNING").limit(1)
+    running_stmt = (
+        select(PGMQueue.id).where(PGMQueue.status == "RUNNING", PGMQueue.target_device_ip == target_ip).limit(1)
+    )
     if (await db.execute(running_stmt)).first():
         raise HTTPException(status_code=400, detail="A test is already running")
 
     # Atomic하게 PENDING -> RUNNING 업데이트 (동시성 문제 방지)
     subq = (
         select(PGMQueue.id)
-        .where(PGMQueue.status == "PENDING")
+        .where(PGMQueue.status == "PENDING", PGMQueue.target_device_ip == target_ip)
         .order_by(PGMQueue.id.asc())
         .limit(1)
         .with_for_update()
@@ -252,7 +263,7 @@ async def _handle_stop_action(db: AsyncSession, redis: Redis, target_ip: str, ac
     # RUNNING 중인 항목이 있다면 상태를 PENDING으로 원자적 롤백 (Worker 종료 시점과 Race Condition 방지)
     stmt = (
         update(PGMQueue)
-        .where(PGMQueue.status == "RUNNING")
+        .where(PGMQueue.status == "RUNNING", PGMQueue.target_device_ip == target_ip)
         .values(status="PENDING", started_at=None)
         .returning(PGMQueue.id)
     )

@@ -82,7 +82,7 @@ async def _chain_next_queue_item(db: AsyncSession, redis, target_ip: str, port: 
     """다음 PENDING 상태 큐를 찾아 RUNNING으로 원자적 변경 후 작업을 이어서 등록(체이닝)합니다."""
     subq = (
         select(PGMQueue.id)
-        .where(PGMQueue.status == "PENDING")
+        .where(PGMQueue.status == "PENDING", PGMQueue.target_device_ip == target_ip)
         .order_by(PGMQueue.id.asc())
         .limit(1)
         .with_for_update(skip_locked=True)

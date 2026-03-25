@@ -10,6 +10,7 @@ class PGMQueue(Base):
     __tablename__ = "pgm_queues"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True, init=False)
+    target_device_ip: Mapped[str] = mapped_column(String(50))
     name: Mapped[str] = mapped_column(String(100))
     duration: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
     status: Mapped[str] = mapped_column(String(50), server_default=text("'PENDING'"), default="PENDING")
@@ -19,6 +20,7 @@ class PGMQueue(Base):
     __table_args__ = (
         Index(
             "ix_pgm_queues_unique_running",
+            "target_device_ip",
             "status",
             unique=True,
             sqlite_where=text("status = 'RUNNING'"),

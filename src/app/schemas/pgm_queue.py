@@ -5,6 +5,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class PGMQueuePayload(BaseModel):
+    target_device_ip: Annotated[str, Field(examples=["192.168.0.10"])]
     name: Annotated[str, Field(examples=["Test 1"])]
 
 

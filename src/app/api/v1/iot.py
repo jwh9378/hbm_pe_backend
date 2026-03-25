@@ -86,20 +86,26 @@ async def get_command_status(command_id: int, db: Annotated[AsyncSession, Depend
 
 @router.websocket("/raspberry/status/{target_device_ip}")
 async def websocket_status_endpoint(websocket: WebSocket, target_device_ip: str):
-    """웹소켓을 통해 5초마다 라즈베리파이 상태를 클라이언트에게 전송합니다."""
+    """웹소켓을 통해 라즈베리파이의 연결 상태가 변경될 때마다 클라이언트에게 상태를 전송합니다."""
     await manager.connect(websocket, target_ip=target_device_ip)
     logger.info(f"WebSocket client connected for {target_device_ip}")
 
     try:
         # 연결 직후 즉시 한 번 상태를 보내줌 (첫 렌더링용)
-        initial_status = await check_hardware_status(target_device_ip, settings.PI_PORT)
-        await websocket.send_json(initial_status)
+        last_status = await check_hardware_status(target_device_ip, settings.PI_PORT)
+        await websocket.send_json(last_status)
 
-        # 이후 5초마다 백그라운드에서 상태 체크 후 전송
+        # 이후 5초마다 백그라운드에서 상태 체크 후, 변경되었을 때만 전송
         while True:
             await asyncio.sleep(5)
-            status = await check_hardware_status(target_device_ip, settings.PI_PORT)
-            await websocket.send_json(status)
+            current_status = await check_hardware_status(target_device_ip, settings.PI_PORT)
+
+            if (
+                last_status["piAStatus"] != current_status["piAStatus"]
+                or last_status["piBStatus"] != current_status["piBStatus"]
+            ):
+                await websocket.send_json(current_status)
+                last_status = current_status
     except WebSocketDisconnect:
         logger.info("WebSocket client disconnected")
     except Exception as e:

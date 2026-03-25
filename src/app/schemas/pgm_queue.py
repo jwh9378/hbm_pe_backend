@@ -31,6 +31,7 @@ class PGMQueueRead(PGMQueueCreateInternal):
 
     id: int
     created_at: datetime
+    started_at: datetime | None = None
     status: str
     duration: int | None = None
 

@@ -5,7 +5,8 @@ import time
 
 import uvloop
 from arq.worker import Worker
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...crud.crud_command import crud_command
@@ -28,34 +29,53 @@ async def _publish_event(redis, target_ip: str, payload: dict) -> None:
 async def _send_payload(target_ip: str, port: int, payload_str: str, context_info: str = "") -> tuple[str, int | None]:
     """기기로 페이로드를 전송하고 응답을 확인한 뒤 상태와 소요 시간을 반환합니다."""
     start_time = time.time()
-    writer = None
-    try:
-        reader, writer = await asyncio.wait_for(asyncio.open_connection(target_ip, port), timeout=5.0)
-        writer.write(payload_str.encode("utf-8"))
-        await writer.drain()
 
-        data = await asyncio.wait_for(reader.read(1024), timeout=5.0)
-        response_text = data.decode("utf-8").strip()
+    for attempt in range(3):
+        writer = None
+        try:
+            reader, writer = await asyncio.wait_for(asyncio.open_connection(target_ip, port), timeout=5.0)
+            writer.write(payload_str.encode("utf-8"))
+            await writer.drain()
 
-        if "OK" not in response_text.upper():
-            logging.error(f"Invalid response from {target_ip}:{port} {context_info} - '{response_text}'")
-            return "FAILED", None
+            data = await asyncio.wait_for(reader.read(1024), timeout=5.0)
+            response_text = data.decode("utf-8").strip()
 
-        return "SUCCESS", int(time.time() - start_time)
-
-    except TimeoutError:
-        logging.error(f"Timeout while communicating with {target_ip}:{port} {context_info}")
-        return "FAILED", None
-    except Exception as e:
-        logging.error(f"Failed to send payload to {target_ip}:{port} {context_info} - {e}")
-        return "FAILED", None
-    finally:
-        if writer:
             try:
-                writer.close()
-                await writer.wait_closed()
-            except Exception as close_error:
-                logging.debug(f"Socket close failed for {target_ip}: {close_error}")
+                response_json = json.loads(response_text)
+                if response_json.get("status") != "OK":
+                    logging.error(f"Invalid status from {target_ip}:{port} {context_info} - '{response_text}'")
+                    return "FAILED", None
+            except json.JSONDecodeError:
+                # JSON 파싱 실패(부분 수신 등) 시 예외를 발생시켜 재시도 로직을 타게 합니다.
+                raise ValueError(f"Invalid non-JSON response: '{response_text}'")
+
+            return "SUCCESS", int(time.time() - start_time)
+
+        except TimeoutError:
+            if attempt == 2:
+                logging.error(f"Timeout while communicating with {target_ip}:{port} {context_info} after 3 attempts")
+                return "FAILED", None
+            logging.warning(
+                f"Timeout communicating with {target_ip}:{port} {context_info}. Retrying {attempt + 1}/3..."
+            )
+            await asyncio.sleep(1)
+        except Exception as e:
+            if attempt == 2:
+                logging.error(f"Failed to send payload to {target_ip}:{port} {context_info} after 3 attempts - {e}")
+                return "FAILED", None
+            logging.warning(
+                f"Error communicating with {target_ip}:{port} {context_info} - {e}. Retrying {attempt + 1}/3..."
+            )
+            await asyncio.sleep(1)
+        finally:
+            if writer:
+                try:
+                    writer.close()
+                    await writer.wait_closed()
+                except Exception as close_error:
+                    logging.debug(f"Socket close failed for {target_ip}: {close_error}")
+
+    return "FAILED", None
 
 
 async def _chain_next_queue_item(db: AsyncSession, redis, target_ip: str, port: int) -> None:
@@ -65,21 +85,23 @@ async def _chain_next_queue_item(db: AsyncSession, redis, target_ip: str, port: 
         .where(PGMQueue.status == "PENDING")
         .order_by(PGMQueue.id.asc())
         .limit(1)
-        .with_for_update()
+        .with_for_update(skip_locked=True)
         .scalar_subquery()
     )
     stmt = (
         update(PGMQueue)
-        .where(
-            PGMQueue.id == subq,
-            ~select(PGMQueue.id).where(PGMQueue.status == "RUNNING").exists(),
-        )
-        .values(status="RUNNING")
+        .where(PGMQueue.id == subq)
+        .values(status="RUNNING", started_at=func.now())
         .returning(PGMQueue.id, PGMQueue.name)
     )
-    result = await db.execute(stmt)
-    await db.commit()
-    next_item = result.first()
+
+    try:
+        result = await db.execute(stmt)
+        await db.commit()
+        next_item = result.first()
+    except IntegrityError:
+        await db.rollback()
+        next_item = None
 
     if next_item:
         await _publish_event(

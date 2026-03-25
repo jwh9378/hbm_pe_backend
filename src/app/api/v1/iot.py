@@ -6,6 +6,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from redis.asyncio import Redis
 from sqlalchemy import delete, func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...core.config import settings
@@ -31,20 +32,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["iot"])
 
 
-GLOBAL_TARGET_DEVICE_IP: str | None = None
-
-
 # --- Helper Functions ---
-def _get_target_ip() -> str:
-    """현재 연결된 라즈베리파이 IP를 가져오거나 예외를 발생시킵니다."""
-    if not GLOBAL_TARGET_DEVICE_IP:
-        raise HTTPException(
-            status_code=400,
-            detail="Target device IP is not set. WebSocket connection required first.",
-        )
-    return GLOBAL_TARGET_DEVICE_IP
-
-
 def _ensure_queue() -> None:
     """ARQ 큐가 사용 가능한지 확인합니다."""
     if queue.pool is None:
@@ -99,10 +87,7 @@ async def get_command_status(command_id: int, db: Annotated[AsyncSession, Depend
 @router.websocket("/raspberry/status/{target_device_ip}")
 async def websocket_status_endpoint(websocket: WebSocket, target_device_ip: str):
     """웹소켓을 통해 5초마다 라즈베리파이 상태를 클라이언트에게 전송합니다."""
-    global GLOBAL_TARGET_DEVICE_IP
-    GLOBAL_TARGET_DEVICE_IP = target_device_ip
-
-    await manager.connect(websocket)
+    await manager.connect(websocket, target_ip=target_device_ip)
     logger.info(f"WebSocket client connected for {target_device_ip}")
 
     try:
@@ -123,32 +108,30 @@ async def websocket_status_endpoint(websocket: WebSocket, target_device_ip: str)
         manager.disconnect(websocket)
 
 
-@router.websocket("/raspberry/test-status")
-async def websocket_test_status_endpoint(websocket: WebSocket, redis: Annotated[Redis, Depends(async_get_redis)]):
+@router.websocket("/raspberry/test-status/{target_device_ip}")
+async def websocket_test_status_endpoint(
+    websocket: WebSocket, target_device_ip: str, redis: Annotated[Redis, Depends(async_get_redis)]
+):
     """웹소켓을 통해 라즈베리파이의 큐(테스트) 상태 변화를 클라이언트에게 실시간으로 푸시합니다."""
-    await manager.connect(websocket)
-    logger.info(f"Test status WebSocket client connected for {GLOBAL_TARGET_DEVICE_IP}")
+    await manager.connect(websocket, target_ip=target_device_ip)
+    logger.info(f"Test status WebSocket client connected for {target_device_ip}")
 
     pubsub = redis.pubsub()
-    await pubsub.subscribe(f"test-status:{GLOBAL_TARGET_DEVICE_IP}")
+    await pubsub.subscribe(f"test-status:{target_device_ip}")
 
     try:
-        while True:
-            message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
-            if message:
+        async for message in pubsub.listen():
+            if message["type"] == "message":
                 data = message["data"]
                 if isinstance(data, bytes):
                     data = data.decode("utf-8")
                 await websocket.send_text(data)
-            else:
-                # 메시지가 없을 경우 다른 태스크가 실행될 수 있도록 짧게 대기합니다.
-                await asyncio.sleep(0.1)
     except WebSocketDisconnect:
         logger.info("Test status WebSocket client disconnected")
     except Exception as e:
         logger.error(f"Test status WebSocket Error: {e}")
     finally:
-        await pubsub.unsubscribe(f"test-status:{GLOBAL_TARGET_DEVICE_IP}")
+        await pubsub.unsubscribe(f"test-status:{target_device_ip}")
         manager.disconnect(websocket)
 
 
@@ -179,11 +162,12 @@ async def remove_raspberry_queue(item_id: int, db: Annotated[AsyncSession, Depen
     """라즈베리파이의 대기열(Queue)에서 특정 테스트를 삭제합니다."""
     stmt = delete(PGMQueue).where(PGMQueue.id == item_id, PGMQueue.status != "RUNNING").returning(PGMQueue.id)
     result = await db.execute(stmt)
-    await db.commit()
 
     if not result.first():
+        await db.rollback()
         raise HTTPException(status_code=400, detail="Queue item not found or is currently running")
 
+    await db.commit()
     return {"message": "Success", "id": item_id}
 
 
@@ -206,22 +190,20 @@ async def _handle_start_action(db: AsyncSession, redis: Redis, target_ip: str) -
 
     stmt = (
         update(PGMQueue)
-        .where(
-            PGMQueue.id == subq,
-            ~select(PGMQueue.id).where(PGMQueue.status == "RUNNING").exists(),
-        )
-        .values(status="RUNNING")
+        .where(PGMQueue.id == subq)
+        .values(status="RUNNING", started_at=func.now())
         .returning(PGMQueue.id, PGMQueue.name)
     )
 
-    result = await db.execute(stmt)
-    await db.commit()
-    started_item = result.first()
+    try:
+        result = await db.execute(stmt)
+        await db.commit()
+        started_item = result.first()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail="A test is already running")
 
     if not started_item:
-        # 동시성으로 인해 다른 요청이 먼저 작업을 시작했는지 재확인
-        if (await db.execute(running_stmt)).first():
-            raise HTTPException(status_code=400, detail="A test is already running")
         raise HTTPException(status_code=404, detail="No pending queue items found")
 
     item_id = started_item.id
@@ -246,7 +228,7 @@ async def _handle_start_action(db: AsyncSession, redis: Redis, target_ip: str) -
         )
     except Exception:
         # 작업 추가 실패 시 상태 롤백
-        rollback_stmt = update(PGMQueue).where(PGMQueue.id == item_id).values(status="PENDING")
+        rollback_stmt = update(PGMQueue).where(PGMQueue.id == item_id).values(status="PENDING", started_at=None)
         await db.execute(rollback_stmt)
         await db.commit()
         raise
@@ -268,7 +250,12 @@ async def _handle_stop_action(db: AsyncSession, redis: Redis, target_ip: str, ac
     )
 
     # RUNNING 중인 항목이 있다면 상태를 PENDING으로 원자적 롤백 (Worker 종료 시점과 Race Condition 방지)
-    stmt = update(PGMQueue).where(PGMQueue.status == "RUNNING").values(status="PENDING").returning(PGMQueue.id)
+    stmt = (
+        update(PGMQueue)
+        .where(PGMQueue.status == "RUNNING")
+        .values(status="PENDING", started_at=None)
+        .returning(PGMQueue.id)
+    )
     result = await db.execute(stmt)
     await db.commit()
     stopped_item = result.first()
@@ -292,6 +279,7 @@ async def _handle_stop_action(db: AsyncSession, redis: Redis, target_ip: str, ac
 @router.post("/raspberry/test/{action}")
 async def handle_test_command(
     action: str,
+    target_device_ip: str,
     db: Annotated[AsyncSession, Depends(async_get_db)],
     redis: Annotated[Redis, Depends(async_get_redis)],
 ):
@@ -303,8 +291,6 @@ async def handle_test_command(
     if action not in ["start", "stop"]:
         raise HTTPException(status_code=400, detail="Invalid action")
 
-    target_ip = _get_target_ip()
-
     if action == "start":
-        return await _handle_start_action(db, redis, target_ip)
-    return await _handle_stop_action(db, redis, target_ip, action)
+        return await _handle_start_action(db, redis, target_device_ip)
+    return await _handle_stop_action(db, redis, target_device_ip, action)

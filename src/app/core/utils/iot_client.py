@@ -8,6 +8,7 @@ from sqlalchemy import select
 from ...models.pgm_queue import PGMQueue
 from ..config import settings
 from ..db.database import local_session
+from .protocol import cmd_health_check, decode_json_line, encode_json_line, health_check_response
 
 logger = logging.getLogger(__name__)
 
@@ -48,18 +49,17 @@ async def check_hardware_status(target_device_ip: str, port: int = settings.PI_P
     try:
         reader, writer = await asyncio.wait_for(asyncio.open_connection(target_device_ip, port), timeout=2.0)
 
-        writer.write(b"STATUS")
+        writer.write(encode_json_line(cmd_health_check()))
         await writer.drain()
 
         data = await asyncio.wait_for(reader.read(1024), timeout=1.5)
-        response_text = data.decode("utf-8").strip()
+        response = decode_json_line(data)
 
         pi_a_status = "ready"
-        if "ready" in response_text.lower() and "not ready" not in response_text.lower():
-            pi_b_status = "ready"
+        pi_b_status = health_check_response(response)
 
     except Exception as e:
-        logger.debug(f"Status check failed for {target_device_ip}: {e}")
+        logger.debug(f"Health check failed for {target_device_ip}: {e}")
     finally:
         if writer:
             try:

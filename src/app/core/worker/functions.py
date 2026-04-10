@@ -9,6 +9,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ...core.utils.protocol import cmd_start_test
 from ...crud.crud_command import crud_command
 from ...models.pgm_queue import PGMQueue
 from ...schemas.command import CommandUpdate
@@ -34,7 +35,7 @@ async def _send_payload(target_ip: str, port: int, payload_str: str, context_inf
         writer = None
         try:
             reader, writer = await asyncio.wait_for(asyncio.open_connection(target_ip, port), timeout=5.0)
-            writer.write(payload_str.encode("utf-8"))
+            writer.write((payload_str + "\n").encode("utf-8"))
             await writer.drain()
 
             data = await asyncio.wait_for(reader.read(1024), timeout=5.0)
@@ -42,7 +43,7 @@ async def _send_payload(target_ip: str, port: int, payload_str: str, context_inf
 
             try:
                 response_json = json.loads(response_text)
-                if response_json.get("status") != "OK":
+                if not response_json.get("ok"):
                     logging.error(f"Invalid status from {target_ip}:{port} {context_info} - '{response_text}'")
                     return "FAILED", None
             except json.JSONDecodeError:
@@ -65,6 +66,92 @@ async def _send_payload(target_ip: str, port: int, payload_str: str, context_inf
                 return "FAILED", None
             logging.warning(
                 f"Error communicating with {target_ip}:{port} {context_info} - {e}. Retrying {attempt + 1}/3..."
+            )
+            await asyncio.sleep(1)
+        finally:
+            if writer:
+                try:
+                    writer.close()
+                    await writer.wait_closed()
+                except Exception as close_error:
+                    logging.debug(f"Socket close failed for {target_ip}: {close_error}")
+
+    return "FAILED", None
+
+
+async def _communicate_with_progress(
+    redis,
+    target_ip: str,
+    port: int,
+    payload_str: str,
+    context_info: str = "",
+) -> tuple[str, int | None]:
+    for attempt in range(3):
+        writer = None
+        try:
+            # -- 연결 & 전송
+            reader, writer = await asyncio.wait_for(asyncio.open_connection(target_ip, port), timeout=5.0)
+            writer.write((payload_str + "\n").encode("utf-8"))
+            await writer.drain()
+
+            last_payload: dict = {}
+
+            # -- 무한 루프: 진행 상황 혹은 최종 결과를 읽는다
+            while True:
+                raw = await asyncio.wait_for(reader.read(4096), timeout=15.0)
+                if not raw:  # 연결이 정상적으로 닫힌 경우
+                    break
+
+                # 서버가 여러 개의 JSON 객체를 연속으로 보낼 수 있으니
+                # 개행(￦n) 으로 구분된다고 가정하고 각각 파싱한다
+                texts = raw.decode("utf-8").splitlines()
+                for txt in texts:
+                    if not txt.strip():
+                        continue
+                    try:
+                        msg = json.loads(txt)
+                    except json.JSONDecodeError:
+                        # 파싱 실패 -> 재시도 로직으로 넘긴다
+                        raise ValueError(f"Invalid non-JSON response: '{txt}'")
+
+                    # -- 진행 상황 이벤트 처리
+                    if msg.get("type") == "EVENT":
+                        event_name = msg.get("event")
+                        current_payload = msg.get("payload", {})
+                        if event_name == "TEST_PLAN_PROGRESS" and last_payload != current_payload:
+                            await _publish_event(
+                                redis,
+                                target_ip,
+                                {
+                                    "type": event_name,
+                                    "payload": current_payload,
+                                },
+                            )
+                            last_payload = current_payload
+                            # 진행 상황만 전파하고 계속 대기
+                            continue
+                        elif event_name == "TEST_PLAN_COMPLETED":
+                            return "SUCCESS", current_payload.get("elapsed", None)
+                        elif event_name == "TEST_PLAN_ABORTED" or event_name == "TEST_PLAN_FAILED":
+                            return "FAILED", None
+
+                        # 알 수 없는 메시지는 debug 로만 남긴다
+                        logging.debug(f"Ignored unknown message from {target_ip}:{port} {context_info} - '{msg}'")
+
+        except (TimeoutError, asyncio.exceptions.TimeoutError):
+            if attempt == 2:
+                logging.error(f"Timeout while communicating with {target_ip}:{port} {context_info} after 3 attempts")
+                return "FAILED", None
+            logging.warning(
+                f"Timeout communicating with {target_ip}:{port} {context_info}. Retrying {attempt + 1}/3..."
+            )
+            await asyncio.sleep(1)
+        except Exception as e:
+            if attempt == 2:
+                logging.error(f"Failed to send payload to {target_ip}:{port} {context_info} after 3 attempts - {e}")
+                return "FAILED", None
+            logging.warning(
+                f"Error Communicating with {target_ip}:{port} {context_info} - {e}. Retrying {attempt + 1}/3..."
             )
             await asyncio.sleep(1)
         finally:
@@ -140,15 +227,17 @@ async def send_socket_command(ctx: Worker, command_id: int, target_ip: str, port
 
 async def send_pgm_queue_to_pi(ctx: Worker, pgm_queue_id: int, target_ip: str, port: int, name: str) -> None:
     """백그라운드에서 큐 데이터를 라즈베리파이로 전송하는 ARQ 워커 함수입니다."""
-    payload_str = json.dumps({"action": "PGM_QUEUE", "id": pgm_queue_id, "name": name})
-    final_status, duration = await _send_payload(
+
+    redis = ctx.get("redis")
+    payload_str = json.dumps(cmd_start_test(name))
+
+    final_status, duration = await _communicate_with_progress(
+        redis,
         target_ip,
         port,
         payload_str,
         context_info=f"for PGM queue {pgm_queue_id}",
     )
-
-    redis = ctx.get("redis")
 
     async with local_session() as db:
         # 현재 상태가 여전히 RUNNING일 때만 성공/실패 상태로 업데이트 (ABORTED인 경우 무시)

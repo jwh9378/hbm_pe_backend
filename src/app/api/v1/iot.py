@@ -15,6 +15,7 @@ from ...core.exceptions.http_exceptions import NotFoundException
 from ...core.utils import queue
 from ...core.utils.cache import async_get_redis
 from ...core.utils.iot_client import check_hardware_status
+from ...core.utils.protocol import cmd_abort_test
 from ...core.utils.websocket_manager import manager
 from ...crud.crud_command import crud_command
 from ...crud.crud_queue import crud_pgm_queue
@@ -100,10 +101,7 @@ async def websocket_status_endpoint(websocket: WebSocket, target_device_ip: str)
             await asyncio.sleep(5)
             current_status = await check_hardware_status(target_device_ip, settings.PI_PORT)
 
-            if (
-                last_status["piAStatus"] != current_status["piAStatus"]
-                or last_status["piBStatus"] != current_status["piBStatus"]
-            ):
+            if last_status != current_status:
                 await websocket.send_json(current_status)
                 last_status = current_status
     except WebSocketDisconnect:
@@ -255,15 +253,16 @@ async def _handle_start_action(db: AsyncSession, redis: Redis, target_ip: str) -
 
 async def _handle_stop_action(db: AsyncSession, redis: Redis, target_ip: str, action: str) -> dict:
     """Stop 명령에 대한 구체적인 처리 로직을 담당합니다."""
+    command_text = json.dumps(cmd_abort_test())
     new_command = await crud_command.create(
-        db, object=CommandCreate(target_device_ip=target_ip, command_text=action.upper())
+        db, object=CommandCreate(target_device_ip=target_ip, command_text=command_text)
     )
     await _enqueue_job(
         "send_socket_command",
         new_command.id,
         target_ip,
         settings.PI_PORT,
-        action.upper(),
+        command_text,
     )
 
     # RUNNING 중인 항목이 있다면 상태를 ABORTED으로 원자적 변경 (Worker 종료 시점과 Race Condition 방지)

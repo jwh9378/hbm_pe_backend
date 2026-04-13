@@ -15,7 +15,7 @@ class PGMQueueCreateInternal(PGMQueuePayload):
 
 class PGMQueueUpdate(BaseModel):
     name: str | None = None
-    duration: int | None = None
+    duration: float | None = None
     status: str | None = None
 
 
@@ -34,7 +34,7 @@ class PGMQueueRead(PGMQueueCreateInternal):
     created_at: datetime
     started_at: datetime | None = None
     status: str
-    duration: int | None = None
+    duration: float | None = None
 
 
 class PGMQueueListResponse(BaseModel):

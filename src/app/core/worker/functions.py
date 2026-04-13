@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import time
+from typing import Any
 
 import uvloop
 from arq.worker import Worker
@@ -85,7 +86,7 @@ async def _communicate_with_progress(
     port: int,
     payload_str: str,
     context_info: str = "",
-) -> tuple[str, int | None]:
+) -> tuple[str, dict[str, Any] | None]:
     for attempt in range(3):
         writer = None
         try:
@@ -131,7 +132,7 @@ async def _communicate_with_progress(
                             # 진행 상황만 전파하고 계속 대기
                             continue
                         elif event_name == "TEST_PLAN_COMPLETED":
-                            return "SUCCESS", current_payload.get("elapsed", None)
+                            return "SUCCESS", current_payload
                         elif event_name == "TEST_PLAN_ABORTED" or event_name == "TEST_PLAN_FAILED":
                             return "FAILED", None
 
@@ -231,7 +232,7 @@ async def send_pgm_queue_to_pi(ctx: Worker, pgm_queue_id: int, target_ip: str, p
     redis = ctx.get("redis")
     payload_str = json.dumps(cmd_start_test(name))
 
-    final_status, duration = await _communicate_with_progress(
+    final_status, result_data = await _communicate_with_progress(
         redis,
         target_ip,
         port,
@@ -242,10 +243,18 @@ async def send_pgm_queue_to_pi(ctx: Worker, pgm_queue_id: int, target_ip: str, p
     async with local_session() as db:
         # 현재 상태가 여전히 RUNNING일 때만 성공/실패 상태로 업데이트 (ABORTED인 경우 무시)
         status = "COMPLETED" if final_status == "SUCCESS" else "ERROR"
+
+        update_values: dict[str, Any] = {"status": status}
+        if status == "COMPLETED" and result_data:
+            update_values["duration"] = result_data.get("elapsed")
+            update_values["passed_count"] = result_data.get("passed_count")
+            update_values["failed_count"] = result_data.get("failed_count")
+            update_values["results"] = result_data.get("results")
+
         stmt = (
             update(PGMQueue)
             .where(PGMQueue.id == pgm_queue_id, PGMQueue.status == "RUNNING")
-            .values(status=status, duration=duration)
+            .values(**update_values)
             .returning(PGMQueue.id)
         )
         result = await db.execute(stmt)

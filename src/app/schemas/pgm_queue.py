@@ -35,6 +35,8 @@ class PGMQueueRead(PGMQueueCreateInternal):
     started_at: datetime | None = None
     status: str
     duration: float | None = None
+    passed_count: int | None = None
+    failed_count: int | None = None
 
 
 class PGMQueueListResponse(BaseModel):

@@ -163,6 +163,20 @@ async def fetch_raspberry_queue(target_device_ip: str, db: Annotated[AsyncSessio
     return {"total_count": total_count, "data": items}
 
 
+@router.get("/raspberry/pgm_queue/history", response_model=PGMQueueListResponse)
+async def fetch_raspberry_queue_history(target_device_ip: str, db: Annotated[AsyncSession, Depends(async_get_db)]):
+    stmt = (
+        select(PGMQueue)
+        .where(PGMQueue.status.in_(["COMPLETED", "ABORTED", "ERROR"]), PGMQueue.target_device_ip == target_device_ip)
+        .order_by(PGMQueue.id.asc())
+        # .limit(200)
+    )
+    result = await db.execute(stmt)
+    items = result.scalars().all()
+
+    return {"total_count": len(items), "data": items}
+
+
 @router.post("/raspberry/pgm_queue", response_model=PGMQueueRead)
 async def add_raspberry_queue(payload: PGMQueuePayload, db: Annotated[AsyncSession, Depends(async_get_db)]):
     """라즈베리파이의 대기열(Queue)에 새 테스트를 추가합니다."""

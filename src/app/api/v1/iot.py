@@ -5,7 +5,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from redis.asyncio import Redis
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import Date, cast, delete, desc, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -175,6 +175,54 @@ async def fetch_raspberry_queue_history(target_device_ip: str, db: Annotated[Asy
     items = result.scalars().all()
 
     return {"total_count": len(items), "data": items}
+
+
+@router.get("/raspberry/pgm_queue/recent_status_history")
+async def fetch_recent_status_history(target_device_ip: str, db: Annotated[AsyncSession, Depends(async_get_db)]):
+    """최근 10일간의 테스트 상태별 통계를 조회합니다."""
+    # 1. 최근 10일의 날짜를 추출 (테스트가 있었던 날짜 기준)
+    recent_dates_stmt = (
+        select(cast(PGMQueue.started_at, Date).label("test_date"))
+        .where(
+            PGMQueue.target_device_ip == target_device_ip,
+            PGMQueue.status.notin_(["RUNNING", "PENDING"]),
+        )
+        .group_by(cast(PGMQueue.started_at, Date))
+        .order_by(desc(cast(PGMQueue.started_at, Date)))
+        .limit(10)
+    )
+    recent_dates_subq = recent_dates_stmt.subquery()
+
+    # 2. 추출된 10일 치 날짜 내에서 일자별, 상태(status)별 카운트 조회
+    stmt = (
+        select(
+            cast(PGMQueue.started_at, Date).label("test_date"), PGMQueue.status, func.count(PGMQueue.id).label("count")
+        )
+        .where(
+            PGMQueue.target_device_ip == target_device_ip,
+            PGMQueue.status.notin_(["RUNNING", "PENDING"]),
+            cast(PGMQueue.started_at, Date).in_(select(recent_dates_subq.c.test_date)),
+        )
+        .group_by(cast(PGMQueue.started_at, Date), PGMQueue.status)
+        .order_by(cast(PGMQueue.started_at, Date).asc())
+    )
+    result = await db.execute(stmt)
+
+    # 3. 프론트엔드 차트 등에서 사용하기 쉽게 데이터 가공
+    history_dict = {}
+    for test_date, status, count in result.all():
+        date_str = str(test_date)
+        if date_str not in history_dict:
+            # Recharts 등의 라이브러리 사용을 고려해 0으로 초기화
+            history_dict[date_str] = {
+                "date": date_str,
+                "COMPLETED": 0,
+                "ABORTED": 0,
+                "ERROR": 0,
+            }
+        history_dict[date_str][status] = count
+
+    return list(history_dict.values())
 
 
 @router.post("/raspberry/pgm_queue", response_model=PGMQueueRead)

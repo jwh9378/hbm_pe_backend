@@ -225,6 +225,36 @@ async def fetch_recent_status_history(target_device_ip: str, db: Annotated[Async
     return list(history_dict.values())
 
 
+@router.get("/raspberry/pgm_queue/stats_by_scenario")
+async def fetch_scenario_stats(target_device_ip: str, db: Annotated[AsyncSession, Depends(async_get_db)]):
+    """시나리오별 테스트 통계(pass/fail)를 조회합니다."""
+    stmt = (
+        select(
+            PGMQueue.name,
+            func.sum(PGMQueue.passed_count).label("total_passed"),
+            func.sum(PGMQueue.failed_count).label("total_failed"),
+        )
+        .where(
+            PGMQueue.status == "COMPLETED",
+            PGMQueue.target_device_ip == target_device_ip,
+        )
+        .group_by(PGMQueue.name)
+        .order_by(PGMQueue.name)
+    )
+    result = await db.execute(stmt)
+
+    # 프론트엔드에서 사용하기 쉽게 데이터 가공
+    stats = [
+        {
+            "name": row.name,
+            "total_passed": int(row.total_passed) if row.total_passed is not None else 0,
+            "total_failed": int(row.total_failed) if row.total_failed is not None else 0,
+        }
+        for row in result.all()
+    ]
+    return stats
+
+
 @router.post("/raspberry/pgm_queue", response_model=PGMQueueRead)
 async def add_raspberry_queue(payload: PGMQueuePayload, db: Annotated[AsyncSession, Depends(async_get_db)]):
     """라즈베리파이의 대기열(Queue)에 새 테스트를 추가합니다."""
